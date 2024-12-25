@@ -57,4 +57,4 @@ npm test
 
 - Log Dashboard
 
-> ![elk](images/elk.png.png)
+> ![elk](images/elk.png)
