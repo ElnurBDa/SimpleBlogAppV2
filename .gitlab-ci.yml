@@ -1,0 +1,122 @@
+stages:
+  - lint
+  - test
+  - sast
+  - build
+  - deploy
+
+variables:
+  BACKEND_IMAGE: "$DOCKER_REGISTRY/$REGISTRY_NAMESPACE/backend-app"
+  FRONTEND_IMAGE: "$DOCKER_REGISTRY/$REGISTRY_NAMESPACE/frontend-app"
+
+
+before_script:
+  - echo "Running CI/CD pipeline"
+
+# Feature branch pipeline
+lint-back:
+  stage: lint
+  only:
+    - /^feature\/.*$/
+   # - main
+  image: node:20 # Use a node-based image
+  before_script:
+    - npm install -g bun
+  script:
+    - cd back
+    - bun i
+    - bun lint
+
+lint-front:
+  stage: lint
+  only:
+    - /^feature\/.*$/
+   #- main
+  image: node:20
+  script:
+    - cd front
+    - npm install
+    - npm run lint
+
+
+test:
+  stage: test
+  only:
+    - /^feature\/.*$/
+  image: node:20 # Use a node-based image
+  before_script:
+    - npm install -g bun
+  script:
+    - echo "Running unit tests..."
+    - cd back
+    - bun install
+    - bun run test
+    - cd ..
+    - echo $CI_COMMIT_REF_NAME
+    - echo $CI_API_V4_URL
+    - echo $CI_PROJECT_ID
+    - |
+      echo "Opening merge request to develop..."
+      curl -v -k --header "PRIVATE-TOKEN: ${CI_TOKEN}" \
+        --request POST \
+        --form "source_branch=${CI_COMMIT_REF_NAME}" \
+        --form "target_branch=develop" \
+        --form "title=Merge ${CI_COMMIT_REF_NAME} to develop" \
+        "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests"
+
+# Development branch pipeline
+sast:
+  stage: sast
+  image: node:alpine3.10
+  only:
+    - develop
+  script:
+    - npm install
+    - npm install -g retire
+    - retire --outputformat json --outputpath retirejs-report.json --severity high
+  artifacts:
+    paths: [retirejs-report.json]
+    when: always
+
+build-backend:
+  stage: build
+  only:
+    - main
+  image: quay.io/podman/stable
+
+  script:
+    - podman build -t $BACKEND_IMAGE:$CI_COMMIT_SHORT_SHA /builds/area51/final/simpleblogapp/back
+    - podman login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD $DOCKER_REGISTRY
+    - echo "Pushing the image to Docker Hub..."
+    - podman push $BACKEND_IMAGE:$CI_COMMIT_SHORT_SHA
+
+build-frontend:
+  stage: build
+  only:
+    - main
+  image: quay.io/podman/stable
+
+  script:
+    - podman build -t $FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA /builds/area51/final/simpleblogapp/front
+    - podman login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD $DOCKER_REGISTRY
+    - echo "Pushing the image to Docker Hub..."
+    - podman push $FRONTEND_IMAGE:$CI_COMMIT_SHORT_SHA
+
+
+
+deploy:
+  stage: deploy
+  script:
+    # Replace placeholders in Kubernetes manifests
+    - sed -i "s|\\${FRONTEND_IMAGE}|$FRONTEND_IMAGE|g" deployment/staging-manifests/frontend-deployment.yaml
+    - sed -i "s|\\${FRONTEND_TAG}|$FRONTEND_TAG|g" deployment/production-manifests/frontend-deployment.yaml
+    - sed -i "s|\\${BACKEND_IMAGE}|$BACKEND_IMAGE|g" deployment/staging-manifests/backend-deployment.yaml
+    - sed -i "s|\\${BACKEND_TAG}|$BACKEND_TAG|g" deployment/production-manifests/backend-deployment.yaml
+    # Commit and push changes to Git
+    - git config --global user.email $GITLAB_USERNAME
+    - git config --global user.name $GITLAB_EMAIL
+    - git checkout -b update-images
+    - git add manifests/
+    - git commit -m "Updated images for commit $CI_COMMIT_SHA"
+    - git push origin update-images
+

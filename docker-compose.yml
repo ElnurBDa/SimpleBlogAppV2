@@ -1,0 +1,30 @@
+services:
+  front:
+    image: front
+    build:
+      context: ./front/
+      dockerfile: ./Dockerfile
+      args:
+        REACT_APP_BACK_API: ${REACT_APP_BACK_API}
+    container_name: front
+    environment:
+      REACT_APP_BACK_API: ${REACT_APP_BACK_API}
+    ports:
+      - "${FRONT_PORT}:80"
+
+  back:
+    image: back
+    build:
+      context: ./back/
+      dockerfile: ./Dockerfile
+    container_name: back
+    environment:
+      PORT: ${BACK_API_PORT}
+      DATABASE_URL: ${DATABASE_URL}
+      ELASTIC_USER: ${ELASTIC_USER}
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      ELASTIC_URL: ${ELASTIC_URL}
+    ports:
+      - "${BACK_API_PORT}:${BACK_API_PORT}"
+    restart: always
+

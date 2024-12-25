@@ -1,0 +1,435 @@
+stages:
+  - test
+  - security testing
+  - build
+  - predeploy
+  - deploy
+  - dast
+
+variables:
+  IMAGE_VERSION: ${CI_COMMIT_TAG:-latest} 
+
+frontend-unit-test-job:
+  image: node:18
+  stage: test
+  before_script:
+    - rm -f .git/shallow.lock || true 
+    - rm -rf /builds/area51/devops-midterm/SimpleBlogApp.tmp/git-template
+    - rm -f .git/shallow || true
+    - rm -f .git/*.lock || true
+    - rm -rf .git/index.lock || true # Additional cleanup for index lock issues
+    - rm -rf .git/HEAD.lock || true  # Additional cleanup for HEAD lock issues 
+ 
+
+
+  script:
+    - cd front/
+    - npm install
+    - npm test --json --outputFile=frontend-test-results.json
+  artifacts:
+    paths:
+      - frontend-test-results.json
+    when: always
+  only:
+    - develop
+
+backend-unit-test-job:
+  image: oven/bun:1
+  stage: test
+  before_script:
+    - rm -f .git/shallow.lock || true 
+#    - rm -rf /builds/area51/devops-midterm/SimpleBlogApp.tmp/git-template
+    - rm -f .git/shallow || true
+    - rm -f .git/*.lock || true 
+    - rm -rf .git/index.lock || true # Additional cleanup for index lock issues
+    - rm -rf .git/HEAD.lock || true  # Additional cleanup for HEAD lock issues 
+
+
+  script:
+    - cd back/
+    - bun install
+    - bun add elysia
+    - bun test --json --outputFile=backend-test-results.json
+  artifacts:
+    paths:
+      - backend-test-results.json
+    when: always
+  only:
+    - develop
+
+sca-backend-job:
+  stage: security testing
+  image: node:18-alpine
+  allow_failure: true
+  before_script:
+    - apk add --no-cache curl python3 py3-pip py3-requests 
+    - wget -O snyk https://github.com/snyk/cli/releases/download/v1.1156.0/snyk-alpine
+    - chmod +x snyk
+    - mv snyk /usr/local/bin/ 
+    - cd back/
+  script:
+    - npm install
+    - snyk auth $SNYK_TOKEN
+    - sleep 30
+    - snyk test --json > sca-backend-result.json
+  after_script:
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 5 --product_id 2  --scanner "Snyk Scan" --test_title "SCA Backend" --lead_id=1 --result_file /builds/area51/devops-midterm/SimpleBlogApp/back/sca-backend-result.json
+  artifacts:
+    paths:
+      - /builds/area51/devops-midterm/SimpleBlogApp/back/sca-backend-result.json
+    when: always
+  only:
+    - main
+
+sca-frontend-job:
+  stage: security testing
+  image: node:18-alpine
+  allow_failure: true
+  before_script:
+    - apk add --no-cache curl python3 py3-pip py3-requests 
+    - wget -O snyk https://github.com/snyk/cli/releases/download/v1.1156.0/snyk-alpine
+    - ls
+    - pwd
+    - chmod +x snyk
+    - mv snyk /usr/local/bin/
+    - cd front/
+  script:
+    - npm install
+    - snyk auth $SNYK_TOKEN
+    - sleep 30
+    - snyk test --json > sca-frontend-result.json
+  after_script:
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 5 --product_id 2  --scanner "Snyk Scan" --test_title "SCA Frontend" --lead_id=1 --result_file /builds/area51/devops-midterm/SimpleBlogApp/front/sca-frontend-result.json
+    - cd front/ && snyk monitor
+  artifacts:
+    paths:
+      - /builds/area51/devops-midterm/SimpleBlogApp/front/sca-frontend-result.json
+    when: always
+  only:
+    - main
+
+secrets-scanning:
+  stage: security testing
+  image: docker:20.10
+  services:
+    - docker:dind
+  before_script:
+    - apk add --no-cache python3 py3-pip py3-requests
+  script:
+    - docker run --network host -v $(pwd):/src --rm hysnsec/trufflehog filesystem /src --json | tee trufflehog-output.json
+  after_script:
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 6 --product_id 2  --scanner "Trufflehog Scan" --test_title "Secret Scanning" --lead_id=1 --result_file /builds/area51/devops-midterm/SimpleBlogApp/trufflehog-output.json
+  artifacts:
+    paths: 
+      - /builds/area51/devops-midterm/SimpleBlogApp/trufflehog-output.json
+    when: always  
+  allow_failure: true
+  only:
+    - main 
+
+sast-job:
+  stage: security testing
+  image: node:18-alpine
+  allow_failure: true
+  before_script:
+    - apk add --no-cache curl python3 py3-pip py3-requests 
+    - wget -O snyk https://github.com/snyk/cli/releases/download/v1.1156.0/snyk-alpine
+    - ls
+    - pwd
+    - chmod +x snyk
+    - mv snyk /usr/local/bin/
+  script:
+    - snyk auth $SNYK_TOKEN
+    - snyk code test --json  > sast-result.json
+  after_script:
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 4 --product_id 2  --scanner "Snyk Scan" --test_title "Test" --lead_id=1 --result_file /builds/area51/devops-midterm/SimpleBlogApp/sast-result.json
+
+  artifacts:
+    paths:
+      - /builds/area51/devops-midterm/SimpleBlogApp/sast-result.json
+    when: always
+  only:
+    - main
+ 
+
+dockerfiles-scan-job:
+  stage: security testing
+  image: docker:20.10
+  allow_failure: true  
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"  
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_NETWORK_OPTIONS: "--dns=8.8.8.8"
+  before_script:
+    - rm -f .git/shallow.lock || true 
+    - rm -rf /builds/area51/devops-midterm/SimpleBlogApp.tmp/git-template
+    - rm -f .git/shallow || true
+    - rm -f .git/*.lock || true 
+    - rm -rf .git/index.lock || true # Additional cleanup for index lock issues
+    - rm -rf .git/HEAD.lock || true  # Additional cleanup for HEAD lock issues 
+    - apk add --no-cache python3 py3-pip py3-requests
+  script:
+    - docker run --rm --network host -v $(pwd):/src hysnsec/trivy fs /src/back/Dockerfile --exit-code 1 -f json -o backDockerfile-report.json
+    - docker run --rm --network host -v $(pwd):/src hysnsec/trivy fs /src/front/Dockerfile --exit-code 1 -f json -o frontDockerfile-report.json
+    - docker run --rm --network host -v $(pwd):/src hysnsec/trivy fs /src/docker-compose.deploy.yml --exit-code 1 -f json -o dockercompose-report.json
+  after_script:
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 7 --product_id 2  --scanner "Trivy Scan" --test_title "Backend Dockerfile" --lead_id=1 --result_file backDockerfile-report.json
+     - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 7 --product_id 2  --scanner "Trivy Scan" --test_title "Frontend Dockerfile" --lead_id=1 --result_file frontDockerfile-report.json
+      - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 7 --product_id 2  --scanner "Trivy Scan" --test_title "Docker compose" --lead_id=1 --result_file dockercompose-report.json
+  artifacts:
+    paths:
+      - dockercompose-report.json
+      - backDockerfile-report.json
+      - frontDockerfile-report.json
+    when: always
+  only:
+    - develop
+
+
+
+build-backend-docker-images:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  before_script:
+    - rm -f .git/config.lock # Remove stale Git lock file if it exists
+    - rm -f .git/shallow.lock || true
+    - rm -rf .git/index.lock || true # Additional cleanup for index lock issues
+    - rm -rf .git/HEAD.lock || true  # Additional cleanup for HEAD lock issues 
+
+  variables:
+    REGISTRY_BACK: $CI_REGISTRY_IMAGE/back
+  script:
+    - |
+      if [ "$CI_COMMIT_TAG" ]; then
+        TAG=$CI_COMMIT_TAG;
+      # else
+      #   TAG=$(date +%Y%m%d%H%M%S); # Fallback to timestamp if no tag
+      fi
+      echo "Building backend with Kaniko..."
+      # Build and push the image with the specific tag
+      /kaniko/executor --context "${CI_PROJECT_DIR}/back" \
+        --dockerfile "${CI_PROJECT_DIR}/back/Dockerfile" \
+        --destination "${REGISTRY_BACK}:${TAG}" \
+        --destination "${REGISTRY_BACK}:latest" \
+        --insecure-registry "gitlab.glynzr.me:5005" \
+        --skip-tls-verify --no-push-cache
+
+  rules:
+    - if: $CI_COMMIT_TAG
+  dependencies:
+    - dockerfiles-scan-job
+
+
+build-frontend-docker-images:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  variables:
+    REGISTRY_FRONT: $CI_REGISTRY_IMAGE/front
+  before_script:
+    - rm -f .git/config.lock # Remove stale Git lock file if it exists
+    - rm -f .git/shallow.lock || true
+    - rm -rf .git/index.lock || true # Additional cleanup for index lock issues
+    - rm -rf .git/HEAD.lock || true  # Additional cleanup for HEAD lock issues
+  script:
+    - |
+      if [ "$CI_COMMIT_TAG" ]; then
+        TAG=$CI_COMMIT_TAG;
+      # else
+      #   TAG=$(date +%Y%m%d%H%M%S); # Fallback to timestamp if no tag
+      fi
+      echo "Building frontend with Kaniko..."
+      # Build and push the image with the specific tag
+      /kaniko/executor --context "${CI_PROJECT_DIR}/front" \
+        --dockerfile "${CI_PROJECT_DIR}/front/Dockerfile" \
+        --destination "${REGISTRY_FRONT}:${TAG}" \
+         --destination "${REGISTRY_FRONT}:latest" \
+        --insecure-registry "gitlab.glynzr.me:5005" \
+        --skip-tls-verify  --no-push-cache
+
+      # Optionally push a 'latest' tag only if it's a tagged commit
+      # if [ "$CI_COMMIT_TAG" ]; then
+      #   echo "Pushing latest tag...";
+      #   /kaniko/executor --context "${CI_PROJECT_DIR}/front" \
+      #     --dockerfile "${CI_PROJECT_DIR}/front/Dockerfile" \
+      #     --destination "${REGISTRY_FRONT}:latest" \
+      #     --insecure-registry "gitlab.glynzr.me:5005" \
+      #     --no-push-cache --skip-tls-verify;
+      # fi
+  rules:
+    - if: $CI_COMMIT_TAG
+  dependencies:
+    - dockerfiles-scan-job
+
+
+inspec-deploy-server:
+  stage: predeploy
+  allow_failure: true
+  image: ubuntu:latest  # Using Docker image
+  before_script:
+    - apt-get update
+    - apt-get install -y curl openssh-client wget git
+    - wget https://packages.chef.io/files/stable/inspec/5.22.29/ubuntu/18.04/inspec_5.22.29-1_amd64.deb
+    - dpkg -i inspec_5.22.29-1_amd64.deb
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOYMENT_SERVER_SSH_PRIVKEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - ssh-keyscan -t rsa $DEPLOYMENT_SERVER >> ~/.ssh/known_hosts
+  script:
+    # Run inspec with SSH
+    - inspec exec https://github.com/dev-sec/linux-baseline.git -t ssh://devops@$DEPLOYMENT_SERVER -i ~/.ssh/id_rsa --chef-license accept --reporter json:inspec-output.json html:inspec-output.html
+  artifacts:
+    paths:
+      - inspec-output.json
+      - inspec-output.html
+    when: always
+  rules:
+    - if: $CI_COMMIT_TAG
+
+
+# ansible-hardening-job:
+# #   stage: predeploy
+# #   image: willhallonline/ansible:2.9-ubuntu-18.04
+# #   before_script:
+# #     - mkdir -p ~/.ssh
+# #     - echo "$DEPLOYMENT_SERVER_SSH_PRIVKEY" | tr -d '\r' > ~/.ssh/id_rsa
+# #     - chmod 600 ~/.ssh/id_rsa
+# #     - eval "$(ssh-agent -s)"
+# #     - ssh-add ~/.ssh/id_rsa
+# #     - ssh-keyscan -t rsa $DEPLOYMENT_SERVER >> ~/.ssh/known_hosts
+# #   script:
+# #     - echo -e "$DEPLOYMENT_SERVER" >> inventory.ini
+# #     - ansible-galaxy install dev-sec.os-hardening
+# #     # Run the ansible-playbook command and save output to ansible-output.log
+# #     #- ansible-playbook -i inventory.ini ansible-hardening.yml | tee ansible-output.log
+#       #- ANSIBLE_STDOUT_CALLBACK=json ansible-playbook  -i inventory.ini ansible-playbook.yml > ansible-os-hardening.json
+# #   artifacts:
+# #     paths:
+# #       - ansible-output.log
+# #     when: always
+# #   only:
+# #     - main
+
+deploy-to-production:
+  stage: deploy
+  image: alpine:latest # Use a lightweight image that has SSH/SCP installed
+  before_script:
+    - apk add --no-cache openssh-client # Install SSH client
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOYMENT_SERVER_SSH_PRIVKEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -t rsa $DEPLOYMENT_SERVER >> ~/.ssh/known_hosts
+  script:
+    - echo "Copying files to production server..."
+    - scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa docker-compose.deploy.yml devops@$DEPLOYMENT_SERVER:$SERVER_HOME/midterm
+    - scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa .env.deploy devops@$DEPLOYMENT_SERVER:$SERVER_HOME/midterm
+    - scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa migrate_db.sh devops@$DEPLOYMENT_SERVER:$SERVER_HOME/midterm
+    - scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa cleanup_containers.sh devops@$DEPLOYMENT_SERVER:$SERVER_HOME/midterm
+    - ssh devops@$DEPLOYMENT_SERVER 'cd ~/midterm && chmod +x  cleanup_containers.sh && ./cleanup_containers.sh && sudo docker compose --env-file .env.deploy -f docker-compose.deploy.yml up -d  && sleep 30 && ./migrate_db.sh'
+  when: manual
+  variables:
+    GIT_SSH_COMMAND: 'ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa' # Use SSH key for authentication
+  rules:
+    - if: $CI_COMMIT_TAG
+  dependencies:
+    - inspec-deploy-server
+
+# container-check-job:
+#   stage: deploy
+#   image: alpine:latest # Use a lightweight image that has SSH/SCP installed
+#   before_script:
+#     - apk add --no-cache openssh-client # Install SSH client
+#     - mkdir -p ~/.ssh
+#     - echo "$DEPLOYMENT_SERVER_SSH_PRIVKEY" | tr -d '\r' > ~/.ssh/id_rsa
+#     - chmod 600 ~/.ssh/id_rsa
+#     - eval "$(ssh-agent -s)"
+#     - ssh-add ~/.ssh/id_rsa
+#     - ssh-keyscan -t rsa $DEPLOYMENT_SERVER >> ~/.ssh/known_hosts
+#   script:
+#     - echo "Copying files to production server..."
+#     - scp -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa test_app.sh devops@$DEPLOYMENT_SERVER:$SERVER_HOME/midterm
+#     - ssh devops@$DEPLOYMENT_SERVER 'cd ~/midterm && chmod +x  test_app.sh && ./test_app.sh' > checking.txt
+#   variables:
+#     GIT_SSH_COMMAND: 'ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa' # Use SSH key for authentication
+#   dependencies:
+#     - deploy-to-production
+#   artifacts:
+#     paths:
+#       - checking.txt
+#     when: always
+#   # only: 
+#   #   -  main
+
+
+
+
+nmap:
+  stage: dast
+  image: docker:20.10  # To run all jobs in this pipeline, use the latest docker image
+  services:
+     - docker:dind 
+  script:
+    - docker pull hysnsec/nmap
+    - docker run --rm -v $(pwd):/tmp hysnsec/nmap $DEPLOYMENT_SERVER -oX /tmp/nmap-output.xml
+  artifacts:
+    paths: [nmap-output.xml]
+    when: always
+  allow_failure: true
+  dependencies:
+    - deploy-to-production
+  rules:
+    - if: $CI_COMMIT_TAG
+
+zap-baseline:
+  stage: dast
+  image: docker:20.10  # To run all jobs in this pipeline, use the latest docker image
+  services:
+    - docker:dind
+  dependencies:
+    - deploy-to-production
+  before_script:
+    - rm -f .git/shallow.lock || true 
+    - rm -f .git/shallow || true
+    - apk add --no-cache python3 py3-pip py3-requests
+  script:
+    - docker pull softwaresecurityproject/zap-stable:2.14.0
+    - docker run --user $(id -u):$(id -g) --rm -v $(pwd):/zap/wrk:rw softwaresecurityproject/zap-stable:2.14.0 zap-baseline.py -t $APP_URL -x zap-output.xml
+  after_script:
+    - docker rmi softwaresecurityproject/zap-stable:2.14.0  # clean up the image to save the disk space
+    - python3 upload-results.py --host $DEFECTDOJO_HOST --environment "Production" --api_key $DEFECTDOJO_API --engagement_id 3 --product_id 2  --scanner "ZAP Scan" --test_title "ZAP " --lead_id=1 --result_file zap-output.xml
+
+  artifacts:
+    paths: [zap-output.xml]
+    when: always # What does this do?
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_TAG
+
+nikto:
+  stage: dast
+  allow_failure: true
+  image: docker:20.10  # To run all jobs in this pipeline, use the latest docker image
+  services:
+  - docker:dind
+  dependencies:
+    - deploy-to-production
+  before_script:
+    - rm -f .git/shallow.lock || true 
+    - rm -f .git/shallow || true
+  script:
+    - docker pull hysnsec/nikto
+    - docker run --rm -v $(pwd):/tmp hysnsec/nikto -h $APP_URL -o /tmp/nikto-output.xml
+
+  artifacts:
+    paths: [nikto-output.xml]
+    when: always
+  rules:
+    - if: $CI_COMMIT_TAG
+
